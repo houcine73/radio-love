@@ -58,7 +58,7 @@ def generate():
     file_id = str(uuid.uuid4())
     mp3_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.mp3")
     
-    # توليد صوت نغمة بسيطة كاختبار
+    # توليد نغمة اختبارية
     cmd = f"ffmpeg -f lavfi -i 'sine=frequency=440:duration=2' -acodec libmp3lame -y \"{mp3_path}\""
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     
