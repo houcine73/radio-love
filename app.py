@@ -1,10 +1,12 @@
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file
 import os
 import uuid
 import wave
 import struct
 import math
 import logging
+import asyncio
+import edge_tts
 
 app = Flask(__name__)
 UPLOAD_FOLDER = "audio"
@@ -25,13 +27,21 @@ def generate_tone_wav(filename, frequency=440, duration=2):
             data = struct.pack('<h', value)
             wav_file.writeframes(data)
 
-try:
-    from gtts import gTTS
-    GTTS_AVAILABLE = True
-    app.logger.info("gTTS loaded successfully")
-except ImportError:
-    GTTS_AVAILABLE = False
-    app.logger.warning("gTTS not available, falling back to tone")
+async def async_generate_speech(text, lang, output_path):
+    # تحديد الصوت حسب اللغة
+    if lang == 'ar':
+        voice = 'ar-EG-SalmaNeural'  # صوت عربي (مصرية) طبيعي جداً
+    elif lang == 'es':
+        voice = 'es-ES-ElviraNeural'
+    elif lang == 'pt':
+        voice = 'pt-BR-FranciscaNeural'
+    elif lang == 'fr':
+        voice = 'fr-FR-DeniseNeural'
+    else:  # الإنجليزية
+        voice = 'en-US-JennyNeural'
+    
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output_path)
 
 @app.route('/')
 def index():
@@ -47,7 +57,6 @@ def index():
         button:hover, select:hover { background:#d4a017; }
         .onair { color:#ff5555; letter-spacing:2px; }
         audio { margin-top:20px; width:100%; }
-        .send-btn { background:#8b0000; margin-top:20px; }
     </style>
     </head>
     <body>
@@ -62,7 +71,7 @@ def index():
             <option value="en">🇬🇧 English</option>
             <option value="fr">🇫🇷 Français</option>
         </select>
-        <textarea id="msg" placeholder="اكتب رسالتك... / Write your message..."></textarea><br/>
+        <textarea id="msg" placeholder="اكتب رسالتك..."></textarea><br/>
         <button id="generateBtn">🎙️ أرسل رسالتك</button>
         <audio id="audio" controls style="display:none;"></audio>
         <div id="status"></div>
@@ -108,7 +117,7 @@ def index():
 def generate():
     data = request.get_json()
     text = data.get('text', '')
-    lang = data.get('lang', 'ar')  # اللغة المختارة من المستخدم
+    lang = data.get('lang', 'ar')
     if not text:
         return 'No text', 400
 
@@ -116,22 +125,15 @@ def generate():
     mp3_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.mp3")
     wav_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.wav")
 
-    # قائمة اللغات المدعومة
-    supported = {'ar', 'es', 'pt', 'en', 'fr'}
-    if lang not in supported:
-        lang = 'en'
-
-    if GTTS_AVAILABLE:
-        try:
-            tts = gTTS(text=text, lang=lang, slow=False)
-            tts.save(mp3_path)
-            app.logger.info(f"gTTS success: lang={lang}, text={text[:30]}")
-            return send_file(mp3_path, mimetype='audio/mpeg')
-        except Exception as e:
-            app.logger.error(f"gTTS failed: {e}")
-            generate_tone_wav(wav_path, frequency=440, duration=2)
-            return send_file(wav_path, mimetype='audio/wav')
-    else:
+    try:
+        # تشغيل الدالة غير المتزامنة بطريقة متزامنة
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(async_generate_speech(text, lang, mp3_path))
+        loop.close()
+        return send_file(mp3_path, mimetype='audio/mpeg')
+    except Exception as e:
+        app.logger.error(f"edge-tts failed: {e}")
         generate_tone_wav(wav_path, frequency=440, duration=2)
         return send_file(wav_path, mimetype='audio/wav')
 
