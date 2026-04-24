@@ -1,7 +1,6 @@
 from flask import Flask, request, send_file
 import os
 import uuid
-import subprocess
 
 app = Flask(__name__)
 UPLOAD_FOLDER = "audio"
@@ -55,16 +54,15 @@ def generate():
     if not text:
         return 'No text', 400
 
+    # إنشاء ملف صوتي بسيط (بيان نصي) بدون FFmpeg
     file_id = str(uuid.uuid4())
     mp3_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.mp3")
     
-    # توليد نغمة اختبارية
-    cmd = f"ffmpeg -f lavfi -i 'sine=frequency=440:duration=2' -acodec libmp3lame -y \"{mp3_path}\""
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        print("FFmpeg error:", result.stderr)
-        return "فشل توليد الصوت", 500
+    # إنشاء ملف MP3 بسيط جدًا (أقل من كيلوبايت)
+    # باستخدام بيانات وهمية (static byte array)
+    dummy_mp3 = b'\xff\xfb\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+    with open(mp3_path, 'wb') as f:
+        f.write(dummy_mp3)
     
     return send_file(mp3_path, mimetype='audio/mpeg')
 
