@@ -6,15 +6,18 @@ import struct
 import math
 import logging
 import asyncio
-import edge_tts
 import subprocess
+import shutil
+import edge_tts
 
 app = Flask(__name__)
 UPLOAD_FOLDER = "audio"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 logging.basicConfig(level=logging.INFO)
 
-# دالة احتياطية للنغمة (دون تأثير)
+# ---------------------------
+# دالة احتياطية لتوليد نغمة بسيطة (في حال فشل كل شيء)
+# ---------------------------
 def generate_tone_wav(filename, frequency=440, duration=2):
     sample_rate = 44100
     amplitude = 16000
@@ -28,42 +31,49 @@ def generate_tone_wav(filename, frequency=440, duration=2):
             data = struct.pack('<h', value)
             wav_file.writeframes(data)
 
+# ---------------------------
+# توليد الصوت النظيف باستخدام edge-tts
+# ---------------------------
 async def async_generate_speech(text, lang, output_path):
-    # الأصوات حسب اللغة
-    if lang == 'ar':
-        voice = 'ar-EG-SalmaNeural'
-    elif lang == 'es':
-        voice = 'es-ES-ElviraNeural'
-    elif lang == 'pt':
-        voice = 'pt-BR-FranciscaNeural'
-    elif lang == 'fr':
-        voice = 'fr-FR-DeniseNeural'
-    else:
-        voice = 'en-US-JennyNeural'
+    # اختيار الصوت حسب اللغة
+    voices = {
+        'ar': 'ar-EG-SalmaNeural',   # عربية (مصرية، أنثى)
+        'es': 'es-ES-ElviraNeural',
+        'pt': 'pt-BR-FranciscaNeural',
+        'fr': 'fr-FR-DeniseNeural',
+        'en': 'en-US-JennyNeural'
+    }
+    voice = voices.get(lang, 'en-US-JennyNeural')
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_path)
 
+# ---------------------------
+# تطبيق تأثير الراديو القديم (يحتاج ffmpeg)
+# ---------------------------
 def apply_radio_effect(input_path, output_path):
-    """تطبيق تأثير الراديو القديم عبر ffmpeg (ترشيح + تشويش خفيف)"""
-    # highpass=300: إزالة الترددات التحت 300Hz (جهير عميق)
-    # lowpass=3500: إزالة الترددات الفوق 3500Hz (حدة زائدة)
-    # volume=1.3: تعزيز بسيط لتعويض الحدة المفقودة
-    # تشويش خفيف: aevalsrc=0.02*sin(2*PI*random()*t) ... لكن الأسهل استخدام anoisesrc
+    """
+    تستخدم ffmpeg لإضافة:
+    - highpass=300 (قطع الترددات المنخفضة جداً)
+    - lowpass=3500 (قطع الترددات العالية جداً)
+    - تشويش خفيف (white noise amplitude=0.04)
+    - تعزيز بسيط للصوت (volume=1.4)
+    """
     cmd = [
         "ffmpeg", "-i", input_path,
         "-af", "highpass=f=300, lowpass=f=3500, volume=1.4, anoisesrc=color=white:amplitude=0.04:duration=2, amix=inputs=2",
         "-y", output_path
     ]
-    # تشغيل الأمر
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        app.logger.error(f"FFmpeg radio effect failed: {result.stderr}")
-        # في حال الفشل، ننسخ الملف الأصلي
-        import shutil
+        app.logger.error(f"FFmpeg effect failed: {result.stderr}")
+        # فشل: ننسخ الصوت النظيف
         shutil.copy(input_path, output_path)
     else:
         app.logger.info("Radio effect applied successfully")
 
+# ---------------------------
+# الصفحة الرئيسية (واجهة المستخدم)
+# ---------------------------
 @app.route('/')
 def index():
     return '''
@@ -78,13 +88,14 @@ def index():
         button:hover, select:hover { background:#d4a017; }
         .onair { color:#ff5555; letter-spacing:2px; }
         audio { margin-top:20px; width:100%; }
+        .status { margin-top:15px; font-style:italic; }
     </style>
     </head>
     <body>
     <div class="radio-box">
         <div class="onair">🔴 ON AIR</div>
         <h1>📻 راديو الحب القديم</h1>
-        <p>ليست كل الرسائل تحتاج أن تُكتب... بعضها تحتاج أن تصل</p>
+        <p>ليست كل الرسائل تحتاج أن تُكتب... بعضها يحتاج أن تصل</p>
         <select id="langSelect">
             <option value="ar">🇸🇦 العربية</option>
             <option value="es">🇪🇸 Español</option>
@@ -95,7 +106,7 @@ def index():
         <textarea id="msg" placeholder="اكتب رسالتك..."></textarea><br/>
         <button id="generateBtn">🎙️ أرسل رسالتك</button>
         <audio id="audio" controls style="display:none;"></audio>
-        <div id="status"></div>
+        <div id="status" class="status"></div>
     </div>
     <script>
         const generateBtn = document.getElementById('generateBtn');
@@ -134,13 +145,16 @@ def index():
     </html>
     '''
 
+# ---------------------------
+# مسار توليد الصوت وتطبيق التأثير
+# ---------------------------
 @app.route('/generate', methods=['POST'])
 def generate():
     data = request.get_json()
     text = data.get('text', '')
     lang = data.get('lang', 'ar')
     if not text:
-        return 'No text', 400
+        return 'لا يوجد نص', 400
 
     file_id = str(uuid.uuid4())
     clean_path = os.path.join(UPLOAD_FOLDER, f"{file_id}_clean.mp3")
@@ -148,26 +162,27 @@ def generate():
     wav_path = os.path.join(UPLOAD_FOLDER, f"{file_id}_fallback.wav")
 
     try:
-        # 1. توليد النص إلى كلام نظيف
+        # 1. توليد الصوت النظيف باستخدام edge-tts
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(async_generate_speech(text, lang, clean_path))
         loop.close()
-        
-        # 2. تطبيق تأثير الراديو القديم (إذا كان ffmpeg موجوداً)
-        # نتحقق من وجود ffmpeg
-        ffmpeg_check = subprocess.run(["which", "ffmpeg"], capture_output=True)
-        if ffmpeg_check.returncode == 0:
+
+        # 2. التحقق من وجود ffmpeg
+        ffmpeg_exists = subprocess.run(['which', 'ffmpeg'], capture_output=True).returncode == 0
+        if ffmpeg_exists:
             apply_radio_effect(clean_path, radio_path)
             return send_file(radio_path, mimetype='audio/mpeg')
         else:
             app.logger.warning("FFmpeg not found, returning clean audio")
             return send_file(clean_path, mimetype='audio/mpeg')
-            
     except Exception as e:
         app.logger.error(f"Speech generation failed: {e}")
         generate_tone_wav(wav_path, frequency=440, duration=2)
         return send_file(wav_path, mimetype='audio/wav')
 
+# ---------------------------
+# تشغيل التطبيق
+# ---------------------------
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
