@@ -1,11 +1,25 @@
 from flask import Flask, request, send_file
 import os
 import uuid
-import subprocess
+import wave
+import struct
+import math
 
 app = Flask(__name__)
 UPLOAD_FOLDER = "audio"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def generate_tone_wav(filename, frequency=440, duration=2, sample_rate=44100, amplitude=16000):
+    """Generates a sine wave WAV file without external dependencies."""
+    num_samples = int(sample_rate * duration)
+    with wave.open(filename, 'w') as wav_file:
+        wav_file.setnchannels(1)  # mono
+        wav_file.setsampwidth(2)  # 2 bytes per sample
+        wav_file.setframerate(sample_rate)
+        for i in range(num_samples):
+            value = int(amplitude * math.sin(2 * math.pi * frequency * i / sample_rate))
+            data = struct.pack('<h', value)
+            wav_file.writeframes(data)
 
 @app.route('/')
 def index():
@@ -56,17 +70,12 @@ def generate():
         return 'No text', 400
 
     file_id = str(uuid.uuid4())
-    mp3_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.mp3")
+    wav_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.wav")
     
-    # توليد نغمة صافية باستخدام FFmpeg
-    cmd = f"ffmpeg -f lavfi -i 'sine=frequency=440:duration=2' -acodec libmp3lame -y \"{mp3_path}\""
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    # توليد نغمة بدون أي أمر خارجي
+    generate_tone_wav(wav_path, frequency=440, duration=2)
     
-    if result.returncode != 0:
-        print("FFmpeg error:", result.stderr)
-        return "فشل توليد الصوت", 500
-    
-    return send_file(mp3_path, mimetype='audio/mpeg')
+    return send_file(wav_path, mimetype='audio/wav')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
