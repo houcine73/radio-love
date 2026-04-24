@@ -7,13 +7,14 @@ import math
 import logging
 import asyncio
 import edge_tts
+import subprocess
 
 app = Flask(__name__)
 UPLOAD_FOLDER = "audio"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 logging.basicConfig(level=logging.INFO)
 
-# دالة احتياطية للنغمة
+# دالة احتياطية للنغمة (دون تأثير)
 def generate_tone_wav(filename, frequency=440, duration=2):
     sample_rate = 44100
     amplitude = 16000
@@ -28,20 +29,40 @@ def generate_tone_wav(filename, frequency=440, duration=2):
             wav_file.writeframes(data)
 
 async def async_generate_speech(text, lang, output_path):
-    # تحديد الصوت حسب اللغة
+    # الأصوات حسب اللغة
     if lang == 'ar':
-        voice = 'ar-EG-SalmaNeural'  # صوت عربي (مصرية) طبيعي جداً
+        voice = 'ar-EG-SalmaNeural'
     elif lang == 'es':
         voice = 'es-ES-ElviraNeural'
     elif lang == 'pt':
         voice = 'pt-BR-FranciscaNeural'
     elif lang == 'fr':
         voice = 'fr-FR-DeniseNeural'
-    else:  # الإنجليزية
+    else:
         voice = 'en-US-JennyNeural'
-    
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_path)
+
+def apply_radio_effect(input_path, output_path):
+    """تطبيق تأثير الراديو القديم عبر ffmpeg (ترشيح + تشويش خفيف)"""
+    # highpass=300: إزالة الترددات التحت 300Hz (جهير عميق)
+    # lowpass=3500: إزالة الترددات الفوق 3500Hz (حدة زائدة)
+    # volume=1.3: تعزيز بسيط لتعويض الحدة المفقودة
+    # تشويش خفيف: aevalsrc=0.02*sin(2*PI*random()*t) ... لكن الأسهل استخدام anoisesrc
+    cmd = [
+        "ffmpeg", "-i", input_path,
+        "-af", "highpass=f=300, lowpass=f=3500, volume=1.4, anoisesrc=color=white:amplitude=0.04:duration=2, amix=inputs=2",
+        "-y", output_path
+    ]
+    # تشغيل الأمر
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        app.logger.error(f"FFmpeg radio effect failed: {result.stderr}")
+        # في حال الفشل، ننسخ الملف الأصلي
+        import shutil
+        shutil.copy(input_path, output_path)
+    else:
+        app.logger.info("Radio effect applied successfully")
 
 @app.route('/')
 def index():
@@ -63,7 +84,7 @@ def index():
     <div class="radio-box">
         <div class="onair">🔴 ON AIR</div>
         <h1>📻 راديو الحب القديم</h1>
-        <p>ليست كل الرسائل تحتاج أن تُكتب... بعضها يحتاج أن تصل</p>
+        <p>ليست كل الرسائل تحتاج أن تُكتب... بعضها تحتاج أن تصل</p>
         <select id="langSelect">
             <option value="ar">🇸🇦 العربية</option>
             <option value="es">🇪🇸 Español</option>
@@ -101,7 +122,7 @@ def index():
                 audioPlayer.src = currentAudioUrl;
                 audioPlayer.style.display = 'block';
                 audioPlayer.play();
-                statusDiv.innerText = '✅ تم البث';
+                statusDiv.innerText = '✅ تم البث على موجات الحنين';
             } catch(e) {
                 statusDiv.innerText = '❌ خطأ: ' + e.message;
             } finally {
@@ -122,18 +143,29 @@ def generate():
         return 'No text', 400
 
     file_id = str(uuid.uuid4())
-    mp3_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.mp3")
-    wav_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.wav")
+    clean_path = os.path.join(UPLOAD_FOLDER, f"{file_id}_clean.mp3")
+    radio_path = os.path.join(UPLOAD_FOLDER, f"{file_id}_radio.mp3")
+    wav_path = os.path.join(UPLOAD_FOLDER, f"{file_id}_fallback.wav")
 
     try:
-        # تشغيل الدالة غير المتزامنة بطريقة متزامنة
+        # 1. توليد النص إلى كلام نظيف
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(async_generate_speech(text, lang, mp3_path))
+        loop.run_until_complete(async_generate_speech(text, lang, clean_path))
         loop.close()
-        return send_file(mp3_path, mimetype='audio/mpeg')
+        
+        # 2. تطبيق تأثير الراديو القديم (إذا كان ffmpeg موجوداً)
+        # نتحقق من وجود ffmpeg
+        ffmpeg_check = subprocess.run(["which", "ffmpeg"], capture_output=True)
+        if ffmpeg_check.returncode == 0:
+            apply_radio_effect(clean_path, radio_path)
+            return send_file(radio_path, mimetype='audio/mpeg')
+        else:
+            app.logger.warning("FFmpeg not found, returning clean audio")
+            return send_file(clean_path, mimetype='audio/mpeg')
+            
     except Exception as e:
-        app.logger.error(f"edge-tts failed: {e}")
+        app.logger.error(f"Speech generation failed: {e}")
         generate_tone_wav(wav_path, frequency=440, duration=2)
         return send_file(wav_path, mimetype='audio/wav')
 
