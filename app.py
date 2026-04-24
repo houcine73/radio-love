@@ -4,11 +4,14 @@ import uuid
 import wave
 import struct
 import math
+import logging
 
 app = Flask(__name__)
 UPLOAD_FOLDER = "audio"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+logging.basicConfig(level=logging.INFO)
 
+# دالة احتياطية للنغمة (تعمل دائماً)
 def generate_tone_wav(filename, frequency=440, duration=2):
     sample_rate = 44100
     amplitude = 16000
@@ -21,6 +24,15 @@ def generate_tone_wav(filename, frequency=440, duration=2):
             value = int(amplitude * math.sin(2 * math.pi * frequency * i / sample_rate))
             data = struct.pack('<h', value)
             wav_file.writeframes(data)
+
+# محاولة استيراد gTTS (في حال فشل، نستخدم التوليد الاحتياطي)
+try:
+    from gtts import gTTS
+    GTTS_AVAILABLE = True
+    app.logger.info("gTTS loaded successfully")
+except ImportError:
+    GTTS_AVAILABLE = False
+    app.logger.warning("gTTS not available, falling back to tone")
 
 @app.route('/')
 def index():
@@ -53,9 +65,9 @@ def index():
                     audio.src = url;
                     audio.style.display = 'block';
                     audio.play();
-                    status.innerText = 'تم البث';
+                    status.innerText = '✅ تم البث';
                 } catch(e) {
-                    status.innerText = 'خطأ: ' + e.message;
+                    status.innerText = '❌ خطأ: ' + e.message;
                 }
             }
         </script>
@@ -69,10 +81,27 @@ def generate():
     text = data.get('text', '')
     if not text:
         return 'No text', 400
+
     file_id = str(uuid.uuid4())
+    mp3_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.mp3")
     wav_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.wav")
-    generate_tone_wav(wav_path, frequency=440, duration=2)
-    return send_file(wav_path, mimetype='audio/wav')
+
+    if GTTS_AVAILABLE:
+        try:
+            # محاولة gTTS (بالإنجليزية حالياً، يمكن لاحقاً إضافة اختيار اللغة)
+            tts = gTTS(text=text, lang='en', slow=False)
+            tts.save(mp3_path)
+            app.logger.info(f"gTTS success for: {text[:30]}")
+            return send_file(mp3_path, mimetype='audio/mpeg')
+        except Exception as e:
+            app.logger.error(f"gTTS failed: {e}")
+            # في حال فشل gTTS، نعود للنغمة
+            generate_tone_wav(wav_path, frequency=440, duration=2)
+            return send_file(wav_path, mimetype='audio/wav')
+    else:
+        # gTTS غير متوفرة، نستخدم النغمة
+        generate_tone_wav(wav_path, frequency=440, duration=2)
+        return send_file(wav_path, mimetype='audio/wav')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
